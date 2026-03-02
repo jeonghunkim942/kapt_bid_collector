@@ -36,22 +36,38 @@ COLUMNS = [
 
 
 def create_session():
-    """requests 세션 생성"""
+    """requests 세션 생성 및 HTTP 관련 우회 설정 강화"""
     session = requests.Session()
     session.headers.update({
-        'User-Agent': random.choice(UA_LIST),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
         'Referer': 'https://www.k-apt.go.kr/',
         'Connection': 'keep-alive',
+        'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Fetch-User': '?1',
         'Upgrade-Insecure-Requests': '1',
     })
     
+    # KAPT 등 일부 사이트는 낡은 TLS버전이나 특정 형태의 핸드셰이크에 민감할 수 있음
+    # 필요하다면 urllib3 레벨에서 복잡한 처리를 하지만, 우선은 재시도 로직 강화
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+    
+    retries = Retry(total=3, backoff_factor=1, status_forcelist=[ 500, 502, 503, 504 ])
+    session.mount('http://', HTTPAdapter(max_retries=retries))
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+    
     try:
         session.get("https://www.k-apt.go.kr/", verify=False, timeout=10)
-        time.sleep(1)
-    except:
-        pass
+        time.sleep(2)
+    except Exception as e:
+        print(f"[초기 세션 연결 오류] {e}")
         
     return session
 
@@ -81,7 +97,12 @@ def scrape_awarded_list(session, date_str):
         )
         
         time.sleep(random.uniform(3.0, 5.0))
-        headers = {'User-Agent': random.choice(UA_LIST)}
+        # 헤더를 세션에 이미 설정했지만 추가로 Accept를 명시
+        headers = {
+            'User-Agent': random.choice(UA_LIST),
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'X-Requested-With': 'XMLHttpRequest'
+        }
         
         try:
             response = session.get(url, headers=headers, timeout=15, verify=False)
