@@ -1,0 +1,47 @@
+name: Daily KAPT Scraper to Google Sheets
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    # 매일 평일(월-금) 아침 8시 (한국시간 기준 UTC 23:00 전일)
+    - cron: '0 23 * * 0-4'
+  workflow_dispatch: # 수동 실행 버튼
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 pandas gspread oauth2client
+
+      - name: Create Google Service Account Secret File
+        env:
+          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+        run: |
+          # Secrets에서 가져온 인증 정보를 json 파일로 임시 저장합니다.
+          echo "$GCP_SERVICE_ACCOUNT_JSON" > client_secret.json
+
+      - name: Run KAPT Scraper
+        env:
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+        working-directory: ./code
+        run: |
+          python main.py
+
+      - name: Cleanup
+        if: always()
+        run: |
+          # 보안 상의 이유로 json 키 파일을 작업 완료 후 삭제
+          rm -f client_secret.json
