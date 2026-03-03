@@ -42,6 +42,31 @@ def get_google_sheet():
         print(f"[Sheets Error] 구글 시트 연결 중 오류 발생: {e}")
         return None
 
+def get_existing_state(worksheet):
+    """
+    구글 시트에서 기존 데이터(입찰마감일, 물건번호)를 읽어옵니다.
+    반환값: (last_date_str, existing_bid_nums_set)
+    """
+    if not worksheet:
+        return None, set()
+        
+    try:
+        records = worksheet.get_all_records()
+        if not records:
+            return None, set()
+            
+        existing_bid_nums = {str(r.get('물건번호', '')) for r in records if r.get('물건번호')}
+        
+        # 마지막 입찰마감일 찾기 ('YYYY-MM-DD' 형태)
+        dates = [str(r.get('입찰마감일', ''))[:10] for r in records if r.get('입찰마감일')]
+        valid_dates = [d for d in dates if len(d) == 10 and d.startswith('20')]
+        last_date = max(valid_dates) if valid_dates else None
+        
+        return last_date, existing_bid_nums
+    except Exception as e:
+        print(f"[Sheets Error] 기존 데이터 상태 로드 중 오류: {e}")
+        return None, set()
+
 def append_to_sheet(worksheet, new_rows_list_of_dicts, columns):
     """
     여러 건의 dict 형태 데이터를 구글 스프레드시트의 하단에 일괄 삽입(Append)합니다.

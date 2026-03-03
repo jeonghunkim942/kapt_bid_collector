@@ -14,10 +14,9 @@ from sheets_handler import get_google_sheet, append_to_sheet
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ─────────────────────────────────────────────
-# 설정
-# ─────────────────────────────────────────────
 CSV_FILE = os.path.join(os.path.dirname(__file__), "bidders_result.csv")
-CRAWL_START_DATE = "2025-09-01"  # 크롤링 시작일
+# 9월 2일부터 시작하도록 지정
+CRAWL_START_DATE = "2024-09-02" 
 
 BASE_URL = "https://www.k-apt.go.kr"
 LIST_URL = f"{BASE_URL}/bid/bidList.do"
@@ -404,13 +403,38 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
     :param start_date: 수집 시작일 (str 'YYYY-MM-DD' 또는 None). None이면 기존 CSV의 마지막 입찰마감일부터 재개.
     :param end_date: 수집 종료일 (str 'YYYY-MM-DD' 또는 None). None이면 오늘 날짜.
     """
-    df = load_existing_df()
-    existing_bid_nums = set(df['물건번호'].unique()) if not df.empty else set()
+    # 1. 구글 시트에서 기존 데이터 상태 가져오기 (GitHub Actions 등 휘발성 환경에서 매우 중요)
+    worksheet = None
+    existing_bid_nums = set()
+    last_sheet_date = None
+    
+    try:
+        from sheets_handler import get_google_sheet, get_existing_state
+        worksheet = get_google_sheet()
+        if worksheet:
+            last_sheet_date, sheet_existing_nums = get_existing_state(worksheet)
+            if sheet_existing_nums:
+                existing_bid_nums.update(sheet_existing_nums)
+    except Exception as e:
+        print(f"[알림] 구글 시트 연동 상태 확인 중 오류: {e}")
 
+    # 2. 로컬 CSV 파일 처리 (로컬 환경 백업용)
+    df = load_existing_df()
+    if not df.empty:
+        csv_existing_nums = set(df['물건번호'].unique())
+        existing_bid_nums.update(csv_existing_nums)
+
+    # 3. 재개 날짜 산정 (시트 1순위, CSV 2순위, 설정값 3순위)
     if start_date:
         resume_date = datetime.date.fromisoformat(start_date)
     else:
-        resume_date = get_resume_date(df)
+        if last_sheet_date:
+            # 마지막으로 적힌 날짜 '다음날'부터 시작 (중복 조회 방지)
+            resume_date = datetime.date.fromisoformat(last_sheet_date) + datetime.timedelta(days=1)
+        elif not df.empty and '입찰마감일' in df.columns:
+            resume_date = get_resume_date(df) + datetime.timedelta(days=1)
+        else:
+            resume_date = datetime.date.fromisoformat(CRAWL_START_DATE)
     
     today = datetime.date.fromisoformat(end_date) if end_date else datetime.date.today()
 
@@ -450,6 +474,9 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
 
             print(f"     [{idx}/{len(new_items)}] {title[:50]} ({bid_num})")
             
+            # 항목 간 충분한 딜레이 (차단 방지)
+            time.sleep(random.uniform(5.0, 10.0))
+            
             if bid_num.startswith('kg2b_'):
                 detail_method, bidders = get_kg2b_bidders(session, bid_num)
             else:
@@ -488,7 +515,9 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
             if worksheet:
                 append_to_sheet(worksheet, total_new_rows, COLUMNS)
                 
-            print(f"   [저장] 중간 저장 완료 (누적 신규 {len(total_new_rows)}건)")
+        # 하루 일치(일 단위) 조회가 끝날 때마다 서버 과부하 방지를 위해 긴 휴식
+        print(f"   [Sleep] {day_str} 일자 수집 완료. 봇 차단 방지를 위해 30초 대기합니다...")
+        time.sleep(30)
 
     # 최종 저장
     if total_new_rows:
@@ -519,14 +548,11 @@ if __name__ == "__main__":
     # ──────────────────────────────────────────
     # 기간 설정
     # ──────────────────────────────────────────
-    # 하루치 테스트:
-    # run_scraper_for_bidders(start_date="2025-09-01", end_date="2025-09-01")
+    # 전체 기간 수집 (24년 9월 2일 ~ 현재):
+    # 한번에 많이 돌면 차단되므로 GitHub Actions에서 매일 조금씩 돌리는 것을 권장합니다.
+    # run_scraper_for_bidders(start_date="2024-09-02")
     #
-    # 전체 기간 수집 (25년 9월 ~ 현재):
-    # run_scraper_for_bidders(start_date="2025-09-01")
-    #
-    # 증분 수집 (기존 CSV 마지막 날짜부터 현재까지):
-    # run_scraper_for_bidders()
+    # 증분 수집 (기존 데이터의 마지막 입찰마감일 이후부터 현재까지):
+    # (스케줄링으로 사용할 때 기본값)
+    run_scraper_for_bidders()
     # ──────────────────────────────────────────
-
-    run_scraper_for_bidders(start_date="2025-09-01", end_date="2025-09-01")
