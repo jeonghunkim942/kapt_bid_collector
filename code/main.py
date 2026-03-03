@@ -296,7 +296,7 @@ def get_kg2b_bidders(session, bid_num):
     bid_num 형태: 'kg2b_123456'
     """
     bid_code = bid_num.replace('kg2b_', '')
-    url = f"https://www.kg2b.com/user/bid_list/bidResultView2.action?bidcode={bid_code}"
+    url = f"https://www.kg2b.com/user/bid_list/KaptBidView.action?bidcode={bid_code}"
     
     try:
         time.sleep(random.uniform(2.0, 5.0))
@@ -305,23 +305,30 @@ def get_kg2b_bidders(session, bid_num):
         soup = BeautifulSoup(response.text, 'html.parser')
         
         bidders = []
-        # KG2B 입찰 결과 테이블 (class='list_table')
-        table = soup.find('table', class_='list_table')
-        if not table:
-            return bidders
+        # KG2B 입찰 결과 테이블 찾기 (순위, 사업자등록번호, 업체명 등이 포함된 테이블)
+        target_table = None
+        for table in soup.find_all('table'):
+            th_texts = [th.get_text(strip=True).replace(' ', '') for th in table.find_all('th')]
+            if '순위' in th_texts and '사업자등록번호' in th_texts and '업체명' in th_texts:
+                target_table = table
+                break
+                
+        if not target_table:
+            return "", bidders
             
-        tbody = table.find('tbody')
-        if not tbody:
-            return bidders
-            
-        rows = tbody.find_all('tr')
+        rows = target_table.find_all('tr')
         for row in rows:
             cells = row.find_all('td')
-            # KG2B 테이블 구조: 0:순위, 1:사업자번호, 2:업체명, 3:대표자, 4:투찰금액, 5:투찰일시, 6:비고(낙찰/유찰 등)
+            # KG2B KaptBidView 테이블 구조: 0:순위, 1:사업자등록번호, 2:업체명, 3:대표자, 4:투찰금액, 5:투찰일시, 6:비고
             if len(cells) < 7:
                 continue
                 
             rank = cells[0].get_text(strip=True)
+            if not rank or rank == '1순위': # 헤더 행이나 의미없는 행 제외 
+                # (가끔 헤더가 td로 되어있는 경우 대비)
+                if '순위' in rank or '사업자' in cells[1].get_text():
+                    continue
+                    
             biz_num = cells[1].get_text(strip=True)
             company = cells[2].get_text(strip=True)
             ceo_name = cells[3].get_text(strip=True)
@@ -329,7 +336,7 @@ def get_kg2b_bidders(session, bid_num):
             amount = re.sub(r'[^0-9]', '', raw_amount)  # 숫자만 추출
             note = cells[6].get_text(strip=True)
             
-            # trpoint_red 클래스가 있거나 비고란에 '낙찰'이 포함되면 Y
+            # trpoint_red 클래스가 있거나 비고란에 '낙찰'이 포함되면 Y, 아니면 N (순위가 1인 경우도 임시로 낙찰로 볼 수 있으나 보통 비고란에 표기됨)
             is_won = 'Y' if ('낙찰' in note or 'trpoint_red' in row.get('class', [])) else 'N'
             
             bidders.append({
