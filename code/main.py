@@ -284,6 +284,9 @@ def get_bidders(session, bid_num):
             return bid_method_detail, bidders
             
         return bid_method_detail, bidders
+    except requests.exceptions.RequestException as e:
+        print(f"      [치명적 오류] KAPT 상세조회 커넥션 에러 {bid_num}: {e}")
+        raise e
     except Exception as e:
         print(f"      [오류] 상세조회 {bid_num}: {e}")
         return "", []
@@ -298,18 +301,23 @@ def get_kg2b_bidders(session, bid_num):
     url = f"https://www.kg2b.com/user/bid_list/KaptBidView.action?bidcode={bid_code}"
     
     try:
-        # KG2B 서버 커넥션 타임아웃 지연 시 명시적 3회 재시도
+        # KG2B 서버 커넥션 타임아웃 지연 시 명시적 3회 재시도 (점진적 대기시간 증가)
         for attempt in range(3):
             try:
-                time.sleep(random.uniform(2.0, 5.0))
+                time.sleep(random.uniform(3.0, 6.0))
+                headers = {
+                    'Referer': 'https://www.kg2b.com/',
+                    'Sec-Fetch-Site': 'same-origin'
+                }
                 # connect timeout 15, read timeout 30 상향 조정
-                response = session.get(url, timeout=(15, 30), verify=False)
+                response = session.get(url, headers=headers, timeout=(15, 30), verify=False)
                 response.raise_for_status()
                 break
             except Exception as e:
                 if attempt < 2:
-                    print(f"      [재시도 {attempt+1}/3] KG2B 연결 지연: {bid_code} ... 5초 후 다시 시도합니다.")
-                    time.sleep(5)
+                    wait_time = 10 * (attempt + 1)
+                    print(f"      [재시도 {attempt+1}/3] KG2B 연결 지연: {bid_code} ... {wait_time}초 후 다시 시도합니다.")
+                    time.sleep(wait_time)
                 else:
                     raise e
                     
@@ -362,6 +370,9 @@ def get_kg2b_bidders(session, bid_num):
             })
             
         return "", bidders
+    except requests.exceptions.RequestException as e:
+        print(f"      [치명적 오류] KG2B 상세조회 커넥션 에러 {bid_num}: {e}")
+        raise e
     except Exception as e:
         print(f"      [오류] KG2B 상세조회 {bid_num}: {e}")
         return "", []
@@ -446,8 +457,12 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
 
     session = create_session()
     total_new_rows = []
+    stop_process = False
 
     for day in date_range(resume_date, today):
+        if stop_process:
+            break
+            
         day_str = day.strftime("%Y-%m-%d")
         print(f"\n[{day_str}] 낙찰공고 조회 중...")
 
@@ -475,12 +490,17 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
             print(f"     [{idx}/{len(new_items)}] {title[:50]} ({bid_num})")
             
             # 항목 간 충분한 딜레이 (차단 방지)
-            time.sleep(random.uniform(5.0, 10.0))
+            time.sleep(random.uniform(2.0, 5.0))
             
-            if bid_num.startswith('kg2b_'):
-                detail_method, bidders = get_kg2b_bidders(session, bid_num)
-            else:
-                detail_method, bidders = get_bidders(session, bid_num)
+            try:
+                if bid_num.startswith('kg2b_'):
+                    detail_method, bidders = get_kg2b_bidders(session, bid_num)
+                else:
+                    detail_method, bidders = get_bidders(session, bid_num)
+            except requests.exceptions.RequestException as e:
+                print(f"   [중단] 커넥션 에러 연속 발생으로 전체 수집 프로세스를 중단하고 지금까지 수집된 데이터를 저장합니다. ({e})")
+                stop_process = True
+                break
                 
             # 상세조회에서 가져온 낙찰방법이 있으면 리스트 정보보다 우선 적용
             final_bid_method = detail_method if detail_method else bid_method

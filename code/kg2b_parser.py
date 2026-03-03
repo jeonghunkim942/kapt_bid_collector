@@ -18,9 +18,25 @@ class Kg2bParser(BaseParser):
         url = f"https://www.kg2b.com/user/bid_list/KaptBidView.action?bidcode={bid_code}"
         
         try:
-            time.sleep(random.uniform(3.0, 5.0))
-            response = self.session.get(url, timeout=15, verify=False)
-            response.raise_for_status()
+            # KG2B 서버 WAF 차단 방지를 위한 전용 헤더 및 재시도 로직
+            headers = {
+                'Referer': 'https://www.kg2b.com/',
+                'Sec-Fetch-Site': 'same-origin'
+            }
+            for attempt in range(3):
+                try:
+                    time.sleep(random.uniform(3.0, 6.0))
+                    response = self.session.get(url, headers=headers, timeout=(15, 30), verify=False)
+                    response.raise_for_status()
+                    break
+                except Exception as e:
+                    if attempt < 2:
+                        wait_t = 10 * (attempt + 1)
+                        logger.warning(f"KG2B parse_detail delay ({item.bid_num}), retrying in {wait_t}s ...")
+                        time.sleep(wait_t)
+                    else:
+                        raise e
+            
             soup = BeautifulSoup(response.text, 'html.parser')
             
             # 본문 텍스트 추출
@@ -98,9 +114,24 @@ class Kg2bParser(BaseParser):
         url = f"https://www.kg2b.com/user/bid_list/bidResultView2.action?bidcode={bid_code}"
         
         try:
-            time.sleep(random.uniform(3.0, 5.0))
-            response = self.session.get(url, timeout=15, verify=False)
-            response.raise_for_status()
+            headers = {
+                'Referer': 'https://www.kg2b.com/',
+                'Sec-Fetch-Site': 'same-origin'
+            }
+            for attempt in range(3):
+                try:
+                    time.sleep(random.uniform(3.0, 6.0))
+                    response = self.session.get(url, headers=headers, timeout=(15, 30), verify=False)
+                    response.raise_for_status()
+                    break
+                except Exception as e:
+                    if attempt < 2:
+                        wait_t = 10 * (attempt + 1)
+                        logger.warning(f"KG2B parse_award_detail delay ({item.bid_num}), retrying in {wait_t}s ...")
+                        time.sleep(wait_t)
+                    else:
+                        raise e
+            
             soup = BeautifulSoup(response.text, 'html.parser')
             
             # 1. 낙찰자 행 찾기 (tr.trpoint_red 가 낙찰자)
