@@ -299,9 +299,21 @@ def get_kg2b_bidders(session, bid_num):
     url = f"https://www.kg2b.com/user/bid_list/KaptBidView.action?bidcode={bid_code}"
     
     try:
-        time.sleep(random.uniform(2.0, 5.0))
-        response = session.get(url, timeout=15, verify=False)
-        response.raise_for_status()
+        # KG2B 서버 커넥션 타임아웃 지연 시 명시적 3회 재시도
+        for attempt in range(3):
+            try:
+                time.sleep(random.uniform(2.0, 5.0))
+                # connect timeout 15, read timeout 30 상향 조정
+                response = session.get(url, timeout=(15, 30), verify=False)
+                response.raise_for_status()
+                break
+            except Exception as e:
+                if attempt < 2:
+                    print(f"      [재시도 {attempt+1}/3] KG2B 연결 지연: {bid_code} ... 5초 후 다시 시도합니다.")
+                    time.sleep(5)
+                else:
+                    raise e
+                    
         soup = BeautifulSoup(response.text, 'html.parser')
         
         bidders = []
