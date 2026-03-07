@@ -17,7 +17,7 @@ except ImportError:
     HAS_CURL_CFFI = False
     print("[알림] curl_cffi 미설치. KG2B 봇 차단 우회 기능이 제한됩니다. pip install curl_cffi")
 
-from sheets_handler import get_google_sheet, append_to_sheet
+from sheets_handler import get_google_sheet, append_to_sheet, append_kg2b_pending
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -538,9 +538,9 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
     print(f"===============================================\n")
 
     session = create_session()
-    kg2b_session = None  # KG2B 전용 세션 (필요 시 lazy 생성)
     total_new_rows = []
     stop_process = False
+    pending_kg2b_items = []  # 별도 시트에 저장할 KG2B 물건
 
     for day in date_range(resume_date, today):
         if stop_process:
@@ -562,45 +562,45 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
             print(f"   -> {len(items)}건 발견, 모두 이미 적재됨 (스킵)")
             continue
 
-        print(f"   -> {len(items)}건 발견, 신규 {len(new_items)}건 상세 조회 시작")
+        # KG2B / KAPT 분류
+        kapt_items = [item for item in new_items if not item['bid_num'].startswith('kg2b_')]
+        kg2b_items = [item for item in new_items if item['bid_num'].startswith('kg2b_')]
 
-        day_new_rows = []  # 이 날짜에서 수집된 데이터 (KG2B 실패 시 버림)
+        if kg2b_items:
+            print(f"   -> {len(items)}건 발견 (KAPT {len(kapt_items)}건, KG2B {len(kg2b_items)}건)")
+            print(f"   -> KG2B {len(kg2b_items)}건은 'KG2B 미수집' 시트에 별도 저장합니다.")
+            for item in kg2b_items:
+                bid_code = item['bid_num'].replace('kg2b_', '')
+                pending_kg2b_items.append({
+                    'close_date': item['close_date'],
+                    'bid_num': item['bid_num'],
+                    'title': item['title'],
+                    'link': f"https://www.kg2b.com/user/bid_list/KaptBidView.action?bidcode={bid_code}",
+                })
+                existing_bid_nums.add(item['bid_num'])
+        else:
+            print(f"   -> {len(items)}건 발견, 신규 {len(kapt_items)}건 상세 조회 시작")
 
-        for idx, item in enumerate(new_items, 1):
+        if not kapt_items:
+            continue
+
+        print(f"   -> KAPT {len(kapt_items)}건 상세 조회 시작")
+
+        for idx, item in enumerate(kapt_items, 1):
             bid_num = item['bid_num']
             close_date = item['close_date']
             title = item['title']
             bid_method = item['bid_method']
-            is_kg2b = bid_num.startswith('kg2b_')
 
-            print(f"     [{idx}/{len(new_items)}] {'[KG2B] ' if is_kg2b else ''}{title[:50]} ({bid_num})")
+            print(f"     [{idx}/{len(kapt_items)}] {title[:50]} ({bid_num})")
             
             # 항목 간 불규칙 딜레이 (차단 방지)
             _jittered_delay(2.0, 5.0)
             
             try:
-                if is_kg2b:
-                    # KG2B 전용 세션 lazy 생성
-                    if kg2b_session is None:
-                        kg2b_session = create_kg2b_session()
-                    
-                    detail_method, bidders, need_new_session = get_kg2b_bidders(kg2b_session, bid_num)
-                    
-                    if need_new_session:
-                        # 세션 재생성 후 1회 더 시도
-                        print(f"      [KG2B] 세션 재생성 후 재시도...")
-                        kg2b_session = create_kg2b_session()
-                        _jittered_delay(3.0, 6.0)
-                        detail_method, bidders, need_new_session2 = get_kg2b_bidders(kg2b_session, bid_num)
-                        if need_new_session2:
-                            # 재시도도 실패 → 프로세스 중단, 이 날짜 데이터 버림
-                            print(f"   [중단] KG2B 연결 실패로 수집을 중단합니다. 이 날짜({day_str})의 데이터는 저장하지 않습니다.")
-                            stop_process = True
-                            break
-                else:
-                    detail_method, bidders = get_bidders(session, bid_num)
+                detail_method, bidders = get_bidders(session, bid_num)
             except requests.exceptions.RequestException as e:
-                print(f"   [중단] 커넥션 에러로 수집을 중단합니다. 이 날짜({day_str})의 데이터는 저장하지 않습니다. ({e})")
+                print(f"   [중단] KAPT 커넥션 에러로 수집을 중단합니다. ({e})")
                 stop_process = True
                 break
                 
@@ -612,7 +612,7 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
                 continue
 
             for bidder in bidders:
-                day_new_rows.append({
+                total_new_rows.append({
                     '입찰마감일': close_date,
                     '물건번호': bid_num,
                     '낙찰방법': final_bid_method,
@@ -629,13 +629,8 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
 
             existing_bid_nums.add(bid_num)
 
-        # KG2B 실패로 중단된 경우 이 날짜 데이터를 저장하지 않음
         if stop_process:
-            print(f"   [!] {day_str} 데이터 {len(day_new_rows)}건은 저장하지 않습니다 (다음 실행 시 재수집).")
             break
-
-        # 이 날짜의 데이터를 전체 목록에 추가
-        total_new_rows.extend(day_new_rows)
 
         # 일자별 중간 저장 (크롤링 중 중단 대비)
         if total_new_rows:
@@ -662,6 +657,10 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
     else:
         print(f"\n[완료] 새롭게 추가할 응찰회사 데이터가 없습니다 (모두 기존 적재 완료).")
 
+    # KG2B 미수집 물건을 별도 시트에 저장
+    if pending_kg2b_items:
+        print(f"\n[KG2B] 미수집 {len(pending_kg2b_items)}건을 별도 시트에 저장합니다...")
+        append_kg2b_pending(pending_kg2b_items)
 
 def _save_to_csv(existing_df, new_rows):
     """새 데이터를 기존 DataFrame과 합쳐서 CSV로 저장"""

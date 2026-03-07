@@ -42,6 +42,73 @@ def get_google_sheet():
         print(f"[Sheets Error] 구글 시트 연결 중 오류 발생: {e}")
         return None
 
+
+KG2B_PENDING_SHEET_NAME = "KG2B 미수집"
+KG2B_PENDING_COLUMNS = ["입찰마감일", "물건번호", "입찰제목", "상세페이지"]
+
+def get_kg2b_pending_sheet():
+    """
+    'KG2B 미수집' 시트탭을 반환합니다. 없으면 새로 생성합니다.
+    """
+    if not os.path.exists(JSON_KEY_PATH) or not SHEET_ID:
+        return None
+
+    try:
+        creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_KEY_PATH, SCOPES)
+        client = gspread.authorize(creds)
+        spreadsheet = client.open_by_key(SHEET_ID)
+
+        # 기존 시트탭 찾기
+        try:
+            ws = spreadsheet.worksheet(KG2B_PENDING_SHEET_NAME)
+        except gspread.exceptions.WorksheetNotFound:
+            # 시트탭이 없으면 새로 생성하고 헤더 추가
+            ws = spreadsheet.add_worksheet(title=KG2B_PENDING_SHEET_NAME, rows=1000, cols=len(KG2B_PENDING_COLUMNS))
+            ws.append_row(KG2B_PENDING_COLUMNS, value_input_option='USER_ENTERED')
+            print(f"[Sheets] '{KG2B_PENDING_SHEET_NAME}' 시트탭 생성 완료")
+        return ws
+    except Exception as e:
+        print(f"[Sheets Error] KG2B 미수집 시트 연결 중 오류: {e}")
+        return None
+
+
+def append_kg2b_pending(kg2b_items_list):
+    """
+    KG2B 미수집 물건들을 'KG2B 미수집' 시트탭에 저장합니다.
+    중복 물건번호는 추가하지 않습니다.
+    
+    :param kg2b_items_list: [{'close_date': ..., 'bid_num': ..., 'title': ..., 'link': ...}, ...]
+    """
+    if not kg2b_items_list:
+        return
+
+    ws = get_kg2b_pending_sheet()
+    if not ws:
+        return
+
+    try:
+        # 기존 물건번호 조회 (중복 방지)
+        existing_records = ws.get_all_records()
+        existing_bid_nums = {str(r.get('물건번호', '')) for r in existing_records}
+
+        rows_to_insert = []
+        for item in kg2b_items_list:
+            if str(item['bid_num']) not in existing_bid_nums:
+                rows_to_insert.append([
+                    item['close_date'],
+                    item['bid_num'],
+                    item['title'],
+                    item['link'],
+                ])
+
+        if rows_to_insert:
+            ws.append_rows(rows_to_insert, value_input_option='USER_ENTERED')
+            print(f"[Sheets] KG2B 미수집 {len(rows_to_insert)}건을 '{KG2B_PENDING_SHEET_NAME}' 시트에 저장했습니다.")
+        else:
+            print(f"[Sheets] KG2B 미수집 시트에 새로 추가할 항목이 없습니다 (모두 중복).")
+    except Exception as e:
+        print(f"[Sheets Error] KG2B 미수집 저장 중 오류: {e}")
+
 def get_existing_state(worksheet):
     """
     구글 시트에서 기존 데이터(입찰마감일, 물건번호)를 읽어옵니다.
