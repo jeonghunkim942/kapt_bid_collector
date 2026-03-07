@@ -33,6 +33,17 @@ jobs:
           # Secrets에서 가져온 인증 정보를 json 파일로 임시 저장합니다.
           echo "$GCP_SERVICE_ACCOUNT_JSON" > client_secret.json
 
+      - name: Network Test (KG2B vs KAPT)
+        run: |
+          echo "=== 인터넷 접속 (내 IP 확인) ==="
+          curl -s https://ifconfig.me || echo "IP 확인 실패"
+          echo "\n\n=== KAPT 연결 테스트 ==="
+          curl -s -o /dev/null -w "KAPT: HTTP %{http_code}, 소요시간 %{time_total}s\n" --connect-timeout 10 https://www.k-apt.go.kr/ || echo "KAPT 연결 실패"
+          echo "=== KG2B 연결 테스트 ==="
+          curl -s -o /dev/null -w "KG2B: HTTP %{http_code}, 소요시간 %{time_total}s\n" --connect-timeout 10 https://www.kg2b.com/ || echo "KG2B 연결 실패 (IP 차단 의심)"
+          echo "=== KG2B 포트 연결 테스트 ==="
+          timeout 10 bash -c '</dev/tcp/www.kg2b.com/443' 2>/dev/null && echo "포트 443 연결 성공" || echo "포트 443 연결 불가 (IP 차단 확실)"
+
       - name: Run KAPT Scraper
         env:
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
