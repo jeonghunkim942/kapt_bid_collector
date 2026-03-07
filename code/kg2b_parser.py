@@ -1,11 +1,26 @@
 import re
 import time
 import random
+import math
 import urllib.parse
 from bs4 import BeautifulSoup
 from .base import BaseParser, logger
 from packages.core.models import AuctionItem, ItemStatus
 from packages.core.file_extractor import FileExtractor
+
+# UA 로테이션용 브라우저 목록
+_UA_LIST = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0'
+]
+
+def _jittered_delay(base_min=2.0, base_max=5.0):
+    """지수 분포 기반 불규칙 딜레이"""
+    mean = (base_min + base_max) / 2.0
+    delay = random.expovariate(1.0 / mean)
+    delay = max(base_min, min(delay, base_max * 1.5))
+    time.sleep(delay)
 
 class Kg2bParser(BaseParser):
     """KG2B (학교장터) 전용 파서"""
@@ -19,13 +34,16 @@ class Kg2bParser(BaseParser):
         
         try:
             # KG2B 서버 WAF 차단 방지를 위한 전용 헤더 및 재시도 로직
-            headers = {
-                'Referer': 'https://www.kg2b.com/',
-                'Sec-Fetch-Site': 'same-origin'
-            }
             for attempt in range(3):
                 try:
-                    time.sleep(random.uniform(3.0, 6.0))
+                    _jittered_delay(3.0, 6.0)
+                    headers = {
+                        'User-Agent': random.choice(_UA_LIST),
+                        'Referer': 'https://www.kg2b.com/user/bid_list/KaptBidList.action',
+                        'Sec-Fetch-Site': 'same-origin',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                    }
                     response = self.session.get(url, headers=headers, timeout=(15, 30), verify=False)
                     response.raise_for_status()
                     break
@@ -114,13 +132,16 @@ class Kg2bParser(BaseParser):
         url = f"https://www.kg2b.com/user/bid_list/bidResultView2.action?bidcode={bid_code}"
         
         try:
-            headers = {
-                'Referer': 'https://www.kg2b.com/',
-                'Sec-Fetch-Site': 'same-origin'
-            }
             for attempt in range(3):
                 try:
-                    time.sleep(random.uniform(3.0, 6.0))
+                    _jittered_delay(3.0, 6.0)
+                    headers = {
+                        'User-Agent': random.choice(_UA_LIST),
+                        'Referer': 'https://www.kg2b.com/user/bid_list/KaptBidList.action',
+                        'Sec-Fetch-Site': 'same-origin',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                    }
                     response = self.session.get(url, headers=headers, timeout=(15, 30), verify=False)
                     response.raise_for_status()
                     break

@@ -2,12 +2,20 @@ import os
 import re
 import time
 import random
+import math
 import urllib.parse
 import requests
 import urllib3
 from bs4 import BeautifulSoup
 import pandas as pd
 import datetime
+
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
+    print("[알림] curl_cffi 미설치. KG2B 봇 차단 우회 기능이 제한됩니다. pip install curl_cffi")
 
 from sheets_handler import get_google_sheet, append_to_sheet
 
@@ -27,6 +35,9 @@ UA_LIST = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0'
 ]
 
+# curl_cffi impersonate 옵션 목록 (Chrome 브라우저 TLS fingerprint 모방)
+CFI_IMPERSONATE_LIST = ["chrome120", "chrome116", "chrome110", "chrome107", "chrome104"]
+
 COLUMNS = [
     '입찰마감일', '물건번호', '낙찰방법', '입찰제목', '낙찰 순번',
     '응찰회사명', '응찰회사사업자번호', '대표자명', '입찰금액',
@@ -35,7 +46,7 @@ COLUMNS = [
 
 
 def create_session():
-    """requests 세션 생성 및 HTTP 관련 우회 설정 강화"""
+    """KAPT용 requests 세션 생성 및 HTTP 관련 우회 설정 강화"""
     session = requests.Session()
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -53,8 +64,6 @@ def create_session():
         'Upgrade-Insecure-Requests': '1',
     })
     
-    # KAPT 등 일부 사이트는 낡은 TLS버전이나 특정 형태의 핸드셰이크에 민감할 수 있음
-    # 필요하다면 urllib3 레벨에서 복잡한 처리를 하지만, 우선은 재시도 로직 강화
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
     
@@ -69,6 +78,69 @@ def create_session():
         print(f"[초기 세션 연결 오류] {e}")
         
     return session
+
+
+def create_kg2b_session():
+    """
+    KG2B 전용 세션 생성.
+    curl_cffi를 사용하여 Chrome TLS fingerprint를 모방하고,
+    KG2B 메인페이지를 먼저 방문하여 쿠키/세션을 확보합니다.
+    """
+    impersonate = random.choice(CFI_IMPERSONATE_LIST)
+    ua = random.choice(UA_LIST)
+    
+    if HAS_CURL_CFFI:
+        session = cffi_requests.Session(impersonate=impersonate)
+        session.headers.update({
+            'User-Agent': ua,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1',
+        })
+    else:
+        # curl_cffi 미설치 시 fallback (일반 requests)
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': ua,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Connection': 'keep-alive',
+            'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1',
+        })
+
+    # KG2B 메인페이지 방문하여 쿠키/세션 확보 (브라우저와 동일한 흐름)
+    try:
+        print(f"   [KG2B] 세션 초기화 (impersonate={impersonate})")
+        session.get("https://www.kg2b.com/", timeout=15, verify=False)
+        time.sleep(random.uniform(1.0, 3.0))
+    except Exception as e:
+        print(f"   [KG2B] 메인페이지 접속 실패 (세션은 생성됨): {e}")
+    
+    return session
+
+
+def _jittered_delay(base_min=2.0, base_max=5.0):
+    """
+    지수 분포 기반 불규칙 딜레이. 평균은 base_min~base_max 사이지만
+    가끔 짧고 가끔 긴 자연스러운 패턴을 생성합니다.
+    sleep 시간의 상한을 base_max * 1.5로 제한합니다.
+    """
+    mean = (base_min + base_max) / 2.0
+    delay = random.expovariate(1.0 / mean)
+    delay = max(base_min, min(delay, base_max * 1.5))
+    time.sleep(delay)
 
 
 def scrape_awarded_list(session, date_str):
@@ -292,25 +364,33 @@ def get_bidders(session, bid_num):
         return "", []
 
 
-def get_kg2b_bidders(session, bid_num):
+def get_kg2b_bidders(kg2b_session, bid_num):
     """
     KG2B (학교장터) 개별 입찰번호의 상세 페이지에서 응찰회사 정보 파싱.
     bid_num 형태: 'kg2b_123456'
+    kg2b_session: create_kg2b_session()으로 생성된 KG2B 전용 세션
+    
+    Returns: (bid_method, bidders, need_new_session)
+      need_new_session: True이면 호출자가 세션을 재생성해야 함
     """
     bid_code = bid_num.replace('kg2b_', '')
     url = f"https://www.kg2b.com/user/bid_list/KaptBidView.action?bidcode={bid_code}"
     
     try:
-        # KG2B 서버 커넥션 타임아웃 지연 시 명시적 3회 재시도 (점진적 대기시간 증가)
+        # KG2B 서버 커넥션 타임아웃 지연 시 명시적 3회 재시도
+        # 재시도마다 UA를 변경하고 지수 분포 딜레이 적용
+        response = None
         for attempt in range(3):
             try:
-                time.sleep(random.uniform(3.0, 6.0))
+                _jittered_delay(3.0, 6.0)
                 headers = {
-                    'Referer': 'https://www.kg2b.com/',
-                    'Sec-Fetch-Site': 'same-origin'
+                    'User-Agent': random.choice(UA_LIST),
+                    'Referer': 'https://www.kg2b.com/user/bid_list/KaptBidList.action',
+                    'Sec-Fetch-Site': 'same-origin',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
                 }
-                # connect timeout 15, read timeout 30 상향 조정
-                response = session.get(url, headers=headers, timeout=(15, 30), verify=False)
+                response = kg2b_session.get(url, headers=headers, timeout=(15, 30), verify=False)
                 response.raise_for_status()
                 break
             except Exception as e:
@@ -319,7 +399,12 @@ def get_kg2b_bidders(session, bid_num):
                     print(f"      [재시도 {attempt+1}/3] KG2B 연결 지연: {bid_code} ... {wait_time}초 후 다시 시도합니다.")
                     time.sleep(wait_time)
                 else:
-                    raise e
+                    # 3회 모두 실패 시 세션 재생성 필요 플래그와 함께 반환
+                    print(f"      [실패] KG2B 상세조회 {bid_num}: {e}")
+                    return "", [], True
+        
+        if response is None:
+            return "", [], True
                     
         soup = BeautifulSoup(response.text, 'html.parser')
         
@@ -333,7 +418,7 @@ def get_kg2b_bidders(session, bid_num):
                 break
                 
         if not target_table:
-            return "", bidders
+            return "", bidders, False
             
         rows = target_table.find_all('tr')
         for row in rows:
@@ -355,7 +440,7 @@ def get_kg2b_bidders(session, bid_num):
             amount = re.sub(r'[^0-9]', '', raw_amount)  # 숫자만 추출
             note = cells[6].get_text(strip=True)
             
-            # trpoint_red 클래스가 있거나 비고란에 '낙찰'이 포함되면 Y, 아니면 N (순위가 1인 경우도 임시로 낙찰로 볼 수 있으나 보통 비고란에 표기됨)
+            # trpoint_red 클래스가 있거나 비고란에 '낙찰'이 포함되면 Y, 아니면 N
             is_won = 'Y' if ('낙찰' in note or 'trpoint_red' in row.get('class', [])) else 'N'
             
             bidders.append({
@@ -369,13 +454,10 @@ def get_kg2b_bidders(session, bid_num):
                 '낙찰회사주소': "",  # KG2B 목록에는 일단 주소가 표시되지 않음
             })
             
-        return "", bidders
-    except requests.exceptions.RequestException as e:
-        print(f"      [치명적 오류] KG2B 상세조회 커넥션 에러 {bid_num}: {e}")
-        raise e
+        return "", bidders, False
     except Exception as e:
         print(f"      [오류] KG2B 상세조회 {bid_num}: {e}")
-        return "", []
+        return "", [], True
 
 def load_existing_df():
     """기존 CSV 파일을 불러오거나 빈 DataFrame 생성"""
@@ -456,6 +538,7 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
     print(f"===============================================\n")
 
     session = create_session()
+    kg2b_session = None  # KG2B 전용 세션 (필요 시 lazy 생성)
     total_new_rows = []
     stop_process = False
 
@@ -481,24 +564,43 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
 
         print(f"   -> {len(items)}건 발견, 신규 {len(new_items)}건 상세 조회 시작")
 
+        day_new_rows = []  # 이 날짜에서 수집된 데이터 (KG2B 실패 시 버림)
+
         for idx, item in enumerate(new_items, 1):
             bid_num = item['bid_num']
             close_date = item['close_date']
             title = item['title']
             bid_method = item['bid_method']
+            is_kg2b = bid_num.startswith('kg2b_')
 
-            print(f"     [{idx}/{len(new_items)}] {title[:50]} ({bid_num})")
+            print(f"     [{idx}/{len(new_items)}] {'[KG2B] ' if is_kg2b else ''}{title[:50]} ({bid_num})")
             
-            # 항목 간 충분한 딜레이 (차단 방지)
-            time.sleep(random.uniform(2.0, 5.0))
+            # 항목 간 불규칙 딜레이 (차단 방지)
+            _jittered_delay(2.0, 5.0)
             
             try:
-                if bid_num.startswith('kg2b_'):
-                    detail_method, bidders = get_kg2b_bidders(session, bid_num)
+                if is_kg2b:
+                    # KG2B 전용 세션 lazy 생성
+                    if kg2b_session is None:
+                        kg2b_session = create_kg2b_session()
+                    
+                    detail_method, bidders, need_new_session = get_kg2b_bidders(kg2b_session, bid_num)
+                    
+                    if need_new_session:
+                        # 세션 재생성 후 1회 더 시도
+                        print(f"      [KG2B] 세션 재생성 후 재시도...")
+                        kg2b_session = create_kg2b_session()
+                        _jittered_delay(3.0, 6.0)
+                        detail_method, bidders, need_new_session2 = get_kg2b_bidders(kg2b_session, bid_num)
+                        if need_new_session2:
+                            # 재시도도 실패 → 프로세스 중단, 이 날짜 데이터 버림
+                            print(f"   [중단] KG2B 연결 실패로 수집을 중단합니다. 이 날짜({day_str})의 데이터는 저장하지 않습니다.")
+                            stop_process = True
+                            break
                 else:
                     detail_method, bidders = get_bidders(session, bid_num)
             except requests.exceptions.RequestException as e:
-                print(f"   [중단] 커넥션 에러 연속 발생으로 전체 수집 프로세스를 중단하고 지금까지 수집된 데이터를 저장합니다. ({e})")
+                print(f"   [중단] 커넥션 에러로 수집을 중단합니다. 이 날짜({day_str})의 데이터는 저장하지 않습니다. ({e})")
                 stop_process = True
                 break
                 
@@ -510,7 +612,7 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
                 continue
 
             for bidder in bidders:
-                total_new_rows.append({
+                day_new_rows.append({
                     '입찰마감일': close_date,
                     '물건번호': bid_num,
                     '낙찰방법': final_bid_method,
@@ -526,6 +628,14 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
                 })
 
             existing_bid_nums.add(bid_num)
+
+        # KG2B 실패로 중단된 경우 이 날짜 데이터를 저장하지 않음
+        if stop_process:
+            print(f"   [!] {day_str} 데이터 {len(day_new_rows)}건은 저장하지 않습니다 (다음 실행 시 재수집).")
+            break
+
+        # 이 날짜의 데이터를 전체 목록에 추가
+        total_new_rows.extend(day_new_rows)
 
         # 일자별 중간 저장 (크롤링 중 중단 대비)
         if total_new_rows:
