@@ -538,9 +538,13 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
     print(f"===============================================\n")
 
     session = create_session()
+    kg2b_session = create_kg2b_session()
     total_new_rows = []
     stop_process = False
-    pending_kg2b_items = []  # 별도 시트에 저장할 KG2B 물건
+    pending_kg2b_items = []  # 별도 시트에 저장할 KG2B 물건 (수집 실패분)
+    kg2b_blocked = False          # True이면 이후 KG2B 물건은 미수집 시트에만 적재
+    kg2b_consecutive_failures = 0 # 연속 실패 횟수
+    KG2B_MAX_FAILURES = 3         # 이 횟수 연속 실패 시 차단 처리
 
     for day in date_range(resume_date, today):
         if stop_process:
@@ -566,20 +570,64 @@ def run_scraper_for_bidders(start_date=None, end_date=None):
         kapt_items = [item for item in new_items if not item['bid_num'].startswith('kg2b_')]
         kg2b_items = [item for item in new_items if item['bid_num'].startswith('kg2b_')]
 
-        if kg2b_items:
-            print(f"   -> {len(items)}건 발견 (KAPT {len(kapt_items)}건, KG2B {len(kg2b_items)}건)")
-            print(f"   -> KG2B {len(kg2b_items)}건은 'KG2B 미수집' 시트에 별도 저장합니다.")
-            for item in kg2b_items:
-                bid_code = item['bid_num'].replace('kg2b_', '')
-                pending_kg2b_items.append({
-                    'close_date': item['close_date'],
-                    'bid_num': item['bid_num'],
-                    'title': item['title'],
-                    'link': f"https://www.kg2b.com/user/bid_list/KaptBidView.action?bidcode={bid_code}",
+        print(f"   -> {len(items)}건 발견 (KAPT {len(kapt_items)}건, KG2B {len(kg2b_items)}건), 신규 처리 시작")
+
+        # ── KG2B 물건 처리 ─────────────────────────────────────────
+        for item in kg2b_items:
+            bid_num = item['bid_num']
+            close_date = item['close_date']
+            title = item['title']
+            bid_code = bid_num.replace('kg2b_', '')
+            link = f"https://www.kg2b.com/user/bid_list/KaptBidView.action?bidcode={bid_code}"
+
+            if kg2b_blocked:
+                # 차단 상태: 낙찰결과 조회 없이 미수집 시트로 직행
+                pending_kg2b_items.append({'close_date': close_date, 'bid_num': bid_num, 'title': title, 'link': link})
+                existing_bid_nums.add(bid_num)
+                continue
+
+            print(f"     [KG2B {kg2b_items.index(item)+1}/{len(kg2b_items)}] {title[:50]} ({bid_num})")
+            bid_method, bidders, need_new_session = get_kg2b_bidders(kg2b_session, bid_num)
+
+            if need_new_session:
+                kg2b_consecutive_failures += 1
+                print(f"       -> KG2B 연결 실패 ({kg2b_consecutive_failures}/{KG2B_MAX_FAILURES})")
+                if kg2b_consecutive_failures >= KG2B_MAX_FAILURES:
+                    kg2b_blocked = True
+                    print(f"       -> KG2B {KG2B_MAX_FAILURES}회 연속 실패. 이후 KG2B 물건은 미수집 시트에 적재합니다.")
+                else:
+                    print(f"       -> KG2B 세션 재생성 후 다음 물건부터 재시도합니다.")
+                    kg2b_session = create_kg2b_session()
+                # 이 물건은 미수집 시트에
+                pending_kg2b_items.append({'close_date': close_date, 'bid_num': bid_num, 'title': title, 'link': link})
+                existing_bid_nums.add(bid_num)
+                continue
+
+            # 성공 시 연속 실패 카운터 초기화
+            kg2b_consecutive_failures = 0
+
+            if not bidders:
+                print(f"       -> KG2B 응찰회사 정보 없음")
+                existing_bid_nums.add(bid_num)
+                continue
+
+            for bidder in bidders:
+                total_new_rows.append({
+                    '입찰마감일': close_date,
+                    '물건번호': bid_num,
+                    '낙찰방법': bid_method,
+                    '입찰제목': title,
+                    '낙찰 순번': bidder['낙찰 순번'],
+                    '응찰회사명': bidder['응찰회사명'],
+                    '응찰회사사업자번호': bidder['응찰회사사업자번호'],
+                    '대표자명': bidder['대표자명'],
+                    '입찰금액': bidder['입찰금액'],
+                    '평가점수': bidder['평가점수'],
+                    '낙찰여부': bidder['낙찰여부'],
+                    '낙찰회사주소': bidder['낙찰회사주소'],
                 })
-                existing_bid_nums.add(item['bid_num'])
-        else:
-            print(f"   -> {len(items)}건 발견, 신규 {len(kapt_items)}건 상세 조회 시작")
+            existing_bid_nums.add(bid_num)
+            print(f"       -> KG2B 응찰회사 {len(bidders)}건 수집 완료")
 
         if not kapt_items:
             continue
